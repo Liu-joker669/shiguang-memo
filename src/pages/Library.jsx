@@ -1,152 +1,307 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createNoteFromText } from '../domain/memo.js';
+import { ACCEPTED_FILE_TYPES, extractTextFromFile, FILE_IMPORT_LIMITS } from '../domain/file-import.js';
+import { createNoteFromDocument, createNoteFromText } from '../domain/memo.js';
 import { useMemoData } from '../memo-context.js';
+
+function makeDraftId(index) {
+  return `draft-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function splitTags(value) {
+  return String(value || '').split(/[，,\s]+/).map(item => item.trim()).filter(Boolean).slice(0, 6);
+}
 
 export default function Library() {
   const navigate = useNavigate();
-  const { notes, addNote, resetNotes } = useMemoData();
+  const fileInputRef = useRef(null);
+  const { notes, addNote, addNotes, resetNotes } = useMemoData();
   const [showImport, setShowImport] = useState(false);
-  const [importText, setImportText] = useState('');
-  const [importTitle, setImportTitle] = useState('');
-  const [aiWorking, setAiWorking] = useState(false);
+  const [drafts, setDrafts] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [panelNotice, setPanelNotice] = useState('');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
   const [importResult, setImportResult] = useState(null);
 
-  function handleImport() {
-    if (!importTitle.trim() || !importText.trim()) return;
-    setAiWorking(true);
-    // 保留短暂处理反馈，实际执行的是本地规则整理。
-    setTimeout(() => {
-      const newNote = createNoteFromText({ title: importTitle, text: importText });
-      addNote(newNote);
-      setAiWorking(false);
-      setShowImport(false);
-      setImportText('');
-      setImportTitle('');
-      setImportResult(newNote);
-    }, 1200);
+  const readyDrafts = drafts.filter(draft => draft.status === 'ready' && draft.note);
+  const isProcessing = drafts.some(draft => draft.status === 'reading');
+
+  function updateDraft(draftId, updater) {
+    setDrafts(current => current.map(draft => (
+      draft.id === draftId ? updater(draft) : draft
+    )));
+  }
+
+  async function handleFiles(fileList) {
+    const selected = Array.from(fileList || []);
+    if (selected.length === 0) return;
+
+    const availableSlots = Math.max(0, FILE_IMPORT_LIMITS.maxFiles - drafts.length);
+    const files = selected.slice(0, availableSlots);
+    setPanelNotice(selected.length > files.length
+      ? `一次最多处理 ${FILE_IMPORT_LIMITS.maxFiles} 份资料，本次已读取 ${files.length} 份。`
+      : '');
+    if (files.length === 0) return;
+
+    const pendingDrafts = files.map((file, index) => ({
+      id: makeDraftId(index),
+      file,
+      fileName: file.name,
+      status: 'reading',
+      note: null,
+      warning: '',
+      error: '',
+    }));
+    setDrafts(current => [...current, ...pendingDrafts]);
+
+    for (const draft of pendingDrafts) {
+      try {
+        const extracted = await extractTextFromFile(draft.file);
+        const note = createNoteFromDocument({
+          id: `file-${Date.now()}-${draft.id}`,
+          fileName: draft.fileName,
+          text: extracted.text,
+          mimeType: draft.file.type,
+          pageCount: extracted.pageCount,
+        });
+        updateDraft(draft.id, current => ({
+          ...current,
+          status: 'ready',
+          note,
+          tagsInput: note.tags.join(' '),
+          warning: extracted.warning,
+        }));
+      } catch (error) {
+        updateDraft(draft.id, current => ({
+          ...current,
+          status: 'error',
+          error: error?.message || '文件读取失败，请换一份资料重试。',
+        }));
+      }
+    }
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    setIsDragging(false);
+    handleFiles(event.dataTransfer.files);
+  }
+
+  function updateNoteField(draftId, field, value) {
+    updateDraft(draftId, draft => ({
+      ...draft,
+      note: { ...draft.note, [field]: value },
+    }));
+  }
+
+  function confirmImport() {
+    const imported = readyDrafts.map(draft => ({
+      ...draft.note,
+      title: draft.note.title.trim() || draft.fileName,
+      category: draft.note.category.trim() || '我的课程',
+      tags: splitTags(draft.tagsInput).length > 0 ? splitTags(draft.tagsInput) : ['课程资料'],
+    }));
+    if (imported.length === 0) return;
+    addNotes(imported);
+    setImportResult({ count: imported.length, title: imported[0].title });
+    setDrafts([]);
+    setShowImport(false);
+    setPasteOpen(false);
+  }
+
+  function importPastedText() {
+    const note = createNoteFromText({ id: `paste-${Date.now()}`, text: pasteText });
+    if (!note) return;
+    addNote(note);
+    setImportResult({ count: 1, title: note.title });
+    setPasteText('');
+    setPasteOpen(false);
+    setShowImport(false);
+  }
+
+  function closeImport() {
+    if (isProcessing) return;
+    setShowImport(false);
+    setDrafts([]);
+    setPanelNotice('');
+    setPasteOpen(false);
   }
 
   return (
-    <div className="page-enter" style={{ padding: '20px 16px' }}>
-      {/* Header */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-          <div>
-            <h2 style={{ fontSize: 22, fontWeight: 700, color: '#1e2130', margin: 0 }}>课程资料库</h2>
-            <p style={{ fontSize: 13, color: '#9aa0b5', marginTop: 4 }}>
-              {notes.length} 篇资料 · 数据只保存在当前浏览器
-            </p>
-          </div>
-          <button type="button" onClick={resetNotes} style={{
-            border: '1px solid #dbe1ea', background: 'white', color: '#64748b',
-            borderRadius: 999, padding: '7px 10px', fontSize: 11, cursor: 'pointer',
-          }}>
-            重置示例
-          </button>
+    <div className="page-enter library-page">
+      <div className="library-heading">
+        <div>
+          <h2>课程资料库</h2>
+          <p>{notes.length} 篇资料 · 数据只保存在当前浏览器</p>
         </div>
+        <button type="button" className="quiet-pill" onClick={resetNotes}>重置示例</button>
       </div>
 
       <div className="demo-notice">
-        当前版本不调用大模型：文本总结、要点和问答由本地规则生成，用于验证复习闭环。
+        文件会在当前设备本地解析，不会上传服务器。资料分类、标签、摘要和要点由本地规则生成，并非大模型结论。
       </div>
 
-      {/* Import success toast */}
       {importResult && (
-        <div className="card-in" style={{
-          background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 14,
-          padding: '12px 16px', marginBottom: 16, fontSize: 13, color: '#065f46',
-        }}>
-          ✅ 《{importResult.title}》已导入，可在卡片、诊断和问答中继续使用
+        <div className="import-success card-in">
+          ✅ {importResult.count > 1
+            ? `已导入 ${importResult.count} 份资料`
+            : `《${importResult.title}》已导入`}，可在卡片、诊断和问答中继续使用
         </div>
       )}
 
-      {/* Import button */}
-      <button onClick={() => setShowImport(true)} style={{
-        width: '100%', background: 'white', border: '2px dashed #c7cbe0', borderRadius: 16,
-        padding: '16px', cursor: 'pointer', fontSize: 14, fontWeight: 600, color: '#6366f1',
-        marginBottom: 20, transition: 'all 0.2s',
-      }}>
-        ＋ 导入课程资料（粘贴文本，本地规则整理）
+      <button type="button" className="open-import-button" onClick={() => setShowImport(true)}>
+        <span>＋</span>
+        <strong>上传课程资料</strong>
+        <small>支持 PDF、Word、TXT、Markdown，可一次选择多份</small>
       </button>
 
-      {/* Import panel */}
       {showImport && (
-        <div className="card-in" style={{
-          background: 'white', borderRadius: 16, padding: 16, marginBottom: 20,
-          border: '1px solid #eef0f5',
-        }}>
-          <input
-            value={importTitle}
-            onChange={e => setImportTitle(e.target.value)}
-            placeholder="资料标题，如：交互设计 · 菲茨定律"
-            style={{
-              width: '100%', border: '1px solid #e5e8f0', borderRadius: 10,
-              padding: '10px 12px', fontSize: 14, marginBottom: 10, outline: 'none',
-              boxSizing: 'border-box',
-            }}
-          />
-          <textarea
-            value={importText}
-            onChange={e => setImportText(e.target.value)}
-            placeholder="粘贴资料内容（论文段落 / 笔记 / 课程内容均可）"
-            rows={5}
-            style={{
-              width: '100%', border: '1px solid #e5e8f0', borderRadius: 10,
-              padding: '10px 12px', fontSize: 13, marginBottom: 12, outline: 'none',
-              resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit',
-            }}
-          />
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={handleImport} disabled={aiWorking} style={{
-              flex: 1, background: aiWorking ? '#c7d2fe' : '#6366f1', border: 'none',
-              color: 'white', padding: '11px', borderRadius: 10, fontSize: 14, fontWeight: 600,
-              cursor: aiWorking ? 'wait' : 'pointer',
-            }}>
-              {aiWorking ? '正在本地整理…' : '导入并生成复习要点'}
-            </button>
-            <button onClick={() => setShowImport(false)} style={{
-              background: 'white', border: '1px solid #e5e8f0', color: '#6b7280',
-              padding: '11px 16px', borderRadius: 10, fontSize: 14, cursor: 'pointer',
-            }}>
-              取消
-            </button>
+        <section className="import-panel card-in" aria-label="导入课程资料">
+          <div className="import-panel-heading">
+            <div>
+              <strong>把资料交给拾光整理</strong>
+              <p>提取文字后自动预填信息，你确认后再加入资料库。</p>
+            </div>
+            <button type="button" onClick={closeImport} disabled={isProcessing} aria-label="关闭导入面板">×</button>
           </div>
-        </div>
+
+          <input
+            ref={fileInputRef}
+            className="visually-hidden"
+            type="file"
+            accept={ACCEPTED_FILE_TYPES}
+            multiple
+            onChange={event => {
+              handleFiles(event.target.files);
+              event.target.value = '';
+            }}
+          />
+          <div
+            className={`file-drop-zone${isDragging ? ' is-dragging' : ''}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={event => {
+              if (event.key === 'Enter' || event.key === ' ') fileInputRef.current?.click();
+            }}
+            onDragOver={event => {
+              event.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+          >
+            <span className="file-drop-icon">📄</span>
+            <strong>点击选择或拖拽资料到这里</strong>
+            <small>单个不超过 20 MB，一次最多 5 份</small>
+          </div>
+          <p className="file-support-note">
+            支持文字型 PDF、.docx、.txt、.md；扫描版 PDF 需要 OCR，旧版 .doc 请先另存为 .docx。
+          </p>
+          {panelNotice && <div className="import-inline-notice">{panelNotice}</div>}
+
+          {drafts.length > 0 && (
+            <div className="import-draft-list">
+              {drafts.map(draft => (
+                <article key={draft.id} className={`import-draft ${draft.status}`}>
+                  <div className="import-draft-status">
+                    <div>
+                      <strong>{draft.fileName}</strong>
+                      {draft.status === 'reading' && <span>正在本地读取和整理…</span>}
+                      {draft.status === 'error' && <span>{draft.error}</span>}
+                      {draft.status === 'ready' && <span>已提取 {draft.note.content.length.toLocaleString()} 字</span>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDrafts(current => current.filter(item => item.id !== draft.id))}
+                      disabled={draft.status === 'reading'}
+                    >
+                      移除
+                    </button>
+                  </div>
+
+                  {draft.status === 'ready' && (
+                    <div className="import-draft-fields">
+                      <label>
+                        标题
+                        <input
+                          value={draft.note.title}
+                          onChange={event => updateNoteField(draft.id, 'title', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        分类
+                        <input
+                          value={draft.note.category}
+                          onChange={event => updateNoteField(draft.id, 'category', event.target.value)}
+                        />
+                      </label>
+                      <label className="full-field">
+                        标签（用空格分隔）
+                        <input
+                          value={draft.tagsInput}
+                          onChange={event => updateDraft(draft.id, current => ({
+                            ...current,
+                            tagsInput: event.target.value,
+                          }))}
+                        />
+                      </label>
+                      <div className="full-field generated-preview">
+                        <b>自动摘要</b>
+                        <p>{draft.note.summary || '未生成摘要'}</p>
+                      </div>
+                      {draft.warning && <p className="full-field draft-warning">⚠️ {draft.warning}</p>}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+
+          <button type="button" className="paste-toggle" onClick={() => setPasteOpen(current => !current)}>
+            {pasteOpen ? '收起文本粘贴' : '没有文件？改为粘贴文字'}
+          </button>
+          {pasteOpen && (
+            <div className="paste-fallback">
+              <textarea
+                value={pasteText}
+                onChange={event => setPasteText(event.target.value)}
+                placeholder="直接粘贴课堂笔记，标题、分类和标签将自动填写"
+                rows={5}
+              />
+              <button type="button" onClick={importPastedText} disabled={!pasteText.trim()}>
+                自动整理并导入
+              </button>
+            </div>
+          )}
+
+          {drafts.length > 0 && (
+            <button
+              type="button"
+              className="confirm-file-import"
+              onClick={confirmImport}
+              disabled={isProcessing || readyDrafts.length === 0}
+            >
+              {isProcessing ? '正在整理资料…' : `确认导入 ${readyDrafts.length} 份资料`}
+            </button>
+          )}
+        </section>
       )}
 
-      {/* Notes list */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {notes.map(n => (
-          <div key={n.id} onClick={() => navigate(`/note/${n.id}`)} style={{
-            background: 'white', borderRadius: 16, padding: 16, cursor: 'pointer',
-            border: '1px solid #eef0f5', transition: 'all 0.15s',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-              <span style={{ fontSize: 15, fontWeight: 600, color: '#1e2130', lineHeight: 1.4, flex: 1, paddingRight: 8 }}>
-                {n.title}
-              </span>
-              <span style={{
-                fontSize: 11, background: '#eef2ff', color: '#6366f1',
-                padding: '3px 8px', borderRadius: 8, whiteSpace: 'nowrap', flexShrink: 0,
-              }}>
-                {n.category}
-              </span>
+      <div className="notes-list">
+        {notes.map(note => (
+          <button key={note.id} type="button" className="note-list-card" onClick={() => navigate(`/note/${note.id}`)}>
+            <div className="note-card-heading">
+              <span>{note.title}</span>
+              <b>{note.category}</b>
             </div>
-            <p style={{ fontSize: 12.5, color: '#6b7280', lineHeight: 1.6, marginBottom: 8 }}>
-              {n.summary}
-            </p>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {n.tags.map(t => (
-                <span key={t} style={{ fontSize: 11, color: '#9aa0b5', background: '#f6f7fb', padding: '2px 8px', borderRadius: 6 }}>
-                  #{t}
-                </span>
-              ))}
-              <span style={{ fontSize: 11, color: '#c3c8d9', marginLeft: 'auto', alignSelf: 'center' }}>
-                {n.createdAt}
-              </span>
+            <p>{note.summary}</p>
+            <div className="note-card-meta">
+              {note.tags.map(tag => <span key={tag}>#{tag}</span>)}
+              <time>{note.createdAt}</time>
             </div>
-          </div>
+          </button>
         ))}
       </div>
     </div>

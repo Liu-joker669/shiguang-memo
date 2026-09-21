@@ -2,6 +2,79 @@ const QUESTION_STOP_WORDS = new Set([
   '什么', '怎么', '如何', '哪些', '为什么', '讲的', '一下', '介绍', '关于', '可以', '这个', '那个',
 ]);
 
+const TAG_STOP_WORDS = new Set([
+  '我们', '你们', '他们', '一个', '一种', '这些', '那些', '以及', '进行', '通过', '需要', '可以', '能够',
+  '相关', '主要', '内容', '资料', '课程', '学习', '复习', '知识', '问题', '方法', '部分', '不同', '使用',
+  'the', 'and', 'for', 'with', 'from', 'this', 'that', 'into', 'document', 'chapter',
+]);
+
+const CATEGORY_RULES = [
+  ['产品与设计', ['产品', '用户', '需求', '交互', '设计', '可用性', '原型', '竞品', '体验']],
+  ['计算机', ['算法', '数据结构', '计算机', '代码', '编程', '数据库', '网络', '操作系统', '软件']],
+  ['数理基础', ['高等数学', '线性代数', '概率', '统计', '微积分', '函数', '定理', '矩阵']],
+  ['工程技术', ['机械', '结构', '材料', '制造', '工程', '工艺', '设备']],
+  ['经管', ['经济', '管理', '营销', '财务', '会计', '商业', '市场']],
+  ['外语', ['英语', 'english', '词汇', '语法', '听力', '阅读理解']],
+];
+
+function fileNameWithoutExtension(fileName) {
+  return String(fileName || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+}
+
+export function inferTitle({ fileName, text } = {}) {
+  const fileTitle = fileNameWithoutExtension(fileName);
+  if (fileTitle && !/^(未命名|文档|document|新建文档)$/i.test(fileTitle)) return fileTitle.slice(0, 48);
+
+  const firstLine = String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*(#+|第?[0-9一二三四五六七八九十]+[章节、.]|[-•])\s*/, '').trim())
+    .find(line => line.length >= 2);
+  return (firstLine || '未命名课程资料').slice(0, 48);
+}
+
+export function inferCategory({ title, text } = {}) {
+  const sample = `${title || ''}\n${String(text || '').slice(0, 12000)}`.toLowerCase();
+  let best = { category: '我的课程', score: 0 };
+
+  CATEGORY_RULES.forEach(([category, keywords]) => {
+    const score = keywords.reduce((total, keyword) => (
+      total + (sample.includes(keyword) ? (String(title || '').toLowerCase().includes(keyword) ? 3 : 1) : 0)
+    ), 0);
+    if (score > best.score) best = { category, score };
+  });
+
+  return best.category;
+}
+
+function segmentWords(text) {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    const segmenter = new Intl.Segmenter('zh-CN', { granularity: 'word' });
+    return [...segmenter.segment(text)]
+      .filter(item => item.isWordLike)
+      .map(item => item.segment.toLowerCase());
+  }
+  return String(text || '').toLowerCase().match(/[a-z][a-z0-9-]+|[\u4e00-\u9fff]{2,8}/g) || [];
+}
+
+export function inferTags({ title, text, limit = 4 } = {}) {
+  const scores = new Map();
+  const addTokens = (value, weight) => {
+    segmentWords(String(value || '')).forEach(token => {
+      const clean = token.replace(/^[\d.]+|[\d.]+$/g, '');
+      if (clean.length < 2 || clean.length > 16 || TAG_STOP_WORDS.has(clean) || /^\d+$/.test(clean)) return;
+      scores.set(clean, (scores.get(clean) || 0) + weight);
+    });
+  };
+
+  addTokens(title, 4);
+  addTokens(String(text || '').slice(0, 30000), 1);
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .slice(0, limit)
+    .map(([token]) => token);
+}
+
 export function summarizeText(text) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (clean.length <= 120) return clean;
@@ -27,20 +100,53 @@ export function extractKeyPoints(text) {
 }
 
 export function createNoteFromText({ title, text, id = `note-${Date.now()}`, createdAt } = {}) {
-  const cleanTitle = String(title || '').trim();
   const cleanText = String(text || '').trim();
-  if (!cleanTitle || !cleanText) return null;
+  if (!cleanText) return null;
+  const cleanTitle = String(title || '').trim() || inferTitle({ text: cleanText });
 
   return {
     id,
     title: cleanTitle,
-    category: '我的资料',
-    tags: ['文本导入'],
+    category: inferCategory({ title: cleanTitle, text: cleanText }),
+    tags: inferTags({ title: cleanTitle, text: cleanText }),
     createdAt: createdAt || new Date().toISOString().slice(0, 10),
     sourceLabel: '本地导入文本',
     content: cleanText,
     summary: summarizeText(cleanText),
     keyPoints: extractKeyPoints(cleanText),
+  };
+}
+
+export function createNoteFromDocument({
+  fileName,
+  text,
+  mimeType,
+  pageCount,
+  id = `file-${Date.now()}`,
+  createdAt,
+} = {}) {
+  const cleanText = String(text || '').trim();
+  if (!cleanText) return null;
+  const title = inferTitle({ fileName, text: cleanText });
+  const extension = String(fileName || '').split('.').pop()?.toUpperCase() || '文件';
+  const sourceParts = [extension, fileName];
+  if (pageCount) sourceParts.push(`${pageCount} 页`);
+
+  return {
+    id,
+    title,
+    category: inferCategory({ title, text: cleanText }),
+    tags: inferTags({ title, text: cleanText }),
+    createdAt: createdAt || new Date().toISOString().slice(0, 10),
+    sourceLabel: sourceParts.filter(Boolean).join(' · '),
+    content: cleanText,
+    summary: summarizeText(cleanText),
+    keyPoints: extractKeyPoints(cleanText),
+    fileMeta: {
+      fileName: String(fileName || ''),
+      mimeType: String(mimeType || ''),
+      pageCount: pageCount || null,
+    },
   };
 }
 

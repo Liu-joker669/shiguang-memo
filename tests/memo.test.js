@@ -4,12 +4,16 @@ import { SEED_NOTES } from '../src/data/seedNotes.js';
 import {
   answerFromNotes,
   buildDiagnosticQuiz,
+  createNoteFromDocument,
   createNoteFromText,
   extractKeyPoints,
   getQuizResult,
+  inferCategory,
+  inferTitle,
   retrieveNotes,
   summarizeText,
 } from '../src/domain/memo.js';
+import { extractTextFromFile, getFileKind } from '../src/domain/file-import.js';
 
 test('text import creates a local note with summary and key points', () => {
   const note = createNoteFromText({
@@ -28,6 +32,50 @@ test('summary and key point rules handle prose without claiming an LLM', () => {
   const text = `${'课程复习需要先确定目标。'.repeat(8)}最后根据错题回看来源。`;
   assert.ok(summarizeText(text).length <= 111);
   assert.ok(extractKeyPoints('复习时先做诊断。然后根据错误回看资料。').length > 0);
+});
+
+test('document import auto-fills title, category, source and tags', () => {
+  const note = createNoteFromDocument({
+    id: 'document-note',
+    fileName: '交互设计-菲茨定律.pdf',
+    text: '菲茨定律用于描述目标距离、目标宽度与指向操作时间之间的关系。交互设计需要扩大高频按钮的点击区域。',
+    mimeType: 'application/pdf',
+    pageCount: 12,
+    createdAt: '2026-09-21',
+  });
+
+  assert.equal(note.title, '交互设计 菲茨定律');
+  assert.equal(note.category, '产品与设计');
+  assert.equal(note.sourceLabel, 'PDF · 交互设计-菲茨定律.pdf · 12 页');
+  assert.ok(note.tags.length > 0);
+});
+
+test('pasted text can infer a title without another form field', () => {
+  const text = '需求优先级评估\n应综合考虑用户价值、影响范围、开发成本与业务目标。';
+  assert.equal(inferTitle({ text }), '需求优先级评估');
+  assert.equal(inferCategory({ title: '需求优先级评估', text }), '产品与设计');
+  assert.equal(createNoteFromText({ text }).title, '需求优先级评估');
+});
+
+test('file import recognises supported formats and reads plain text locally', async () => {
+  const file = {
+    name: '课程笔记.md',
+    size: 128,
+    type: 'text/markdown',
+    text: async () => '# 课程笔记\n这是用于测试本地资料导入的正文。',
+  };
+
+  assert.equal(getFileKind('lecture.pdf'), 'pdf');
+  assert.equal(getFileKind('lecture.docx'), 'docx');
+  assert.equal(getFileKind('lecture.doc'), 'legacy-word');
+  assert.equal((await extractTextFromFile(file)).text, '# 课程笔记\n这是用于测试本地资料导入的正文。');
+});
+
+test('legacy Word files return an actionable boundary message', async () => {
+  await assert.rejects(
+    extractTextFromFile({ name: '旧讲义.doc', size: 128 }),
+    error => error.code === 'legacy-word' && error.message.includes('.docx'),
+  );
 });
 
 test('Chinese natural-language questions retrieve matching notes', () => {

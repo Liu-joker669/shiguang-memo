@@ -25,6 +25,9 @@ export default function MemoProvider({ children }) {
     addNote(note) {
       setNotes(current => [note, ...current]);
     },
+    addNotes(newNotes) {
+      setNotes(current => [...newNotes, ...current]);
+    },
     resetNotes() {
       setNotes(SEED_NOTES);
     },
