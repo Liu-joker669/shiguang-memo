@@ -76,27 +76,38 @@ export function inferTags({ title, text, limit = 4 } = {}) {
 }
 
 export function summarizeText(text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (clean.length <= 120) return clean;
-  const sentences = clean.split(/[。！？]/).map(item => item.trim()).filter(Boolean);
-  return `${sentences.slice(0, 2).join('。').slice(0, 110)}${sentences.length > 2 ? '…' : ''}`;
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(line => line && !/^第\s*\d+\s*页/.test(line));
+  const contentLines = lines.filter(line => !/^(.*课程|.*面试)?试讲题目?$/.test(line));
+  const source = contentLines.length > 0 ? contentLines : lines;
+  const sentences = source
+    .flatMap(line => line.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [])
+    .map(item => item.trim())
+    .filter(Boolean);
+  const clean = sentences.join(' ');
+  if (clean.length <= 110) return clean;
+  return `${sentences.slice(0, 2).join(' ').slice(0, 110)}${sentences.length > 2 || clean.length > 110 ? '…' : ''}`;
 }
 
 export function extractKeyPoints(text) {
-  const lines = String(text || '').split('\n').map(line => line.trim()).filter(line => line.length > 3);
-  const listed = lines
-    .filter(line => /^[0-9]+[.、）)]/.test(line) || /^[-•]/.test(line))
-    .map(line => line.replace(/^[0-9]+[.、）)]\s*/, '').replace(/^[-•]\s*/, ''))
-    .filter(Boolean)
-    .slice(0, 5);
-  if (listed.length > 0) return listed;
+  const points = String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(line => line.length > 3)
+    .filter(line => !/^第\s*\d+\s*页/.test(line))
+    .filter(line => !/^(.*课程|.*面试)?试讲题目?$/.test(line))
+    .flatMap(line => line.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [])
+    .map(item => item
+      .replace(/^[0-9]+[.、）)]\s*/, '')
+      .replace(/^[（(][0-9]+[）)]\s*/, '')
+      .replace(/^[-•]\s*/, '')
+      .trim())
+    .filter(item => item.length >= 4)
+    .map(item => item.slice(0, 46));
 
-  return String(text || '')
-    .split(/[。！？]/)
-    .map(item => item.trim())
-    .filter(item => item.length > 5)
-    .slice(0, 3)
-    .map(item => item.slice(0, 32));
+  return [...new Set(points)].slice(0, 5);
 }
 
 export function createNoteFromText({ title, text, id = `note-${Date.now()}`, createdAt } = {}) {
@@ -122,6 +133,7 @@ export function createNoteFromDocument({
   text,
   mimeType,
   pageCount,
+  importWarning,
   id = `file-${Date.now()}`,
   createdAt,
 } = {}) {
@@ -147,6 +159,7 @@ export function createNoteFromDocument({
       mimeType: String(mimeType || ''),
       pageCount: pageCount || null,
     },
+    importWarning: String(importWarning || ''),
   };
 }
 

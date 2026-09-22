@@ -26,7 +26,11 @@ export default function MemoProvider({ children }) {
       setNotes(current => [note, ...current]);
     },
     addNotes(newNotes) {
-      setNotes(current => [...newNotes, ...current]);
+      const importedFileNames = new Set(newNotes.map(note => note.fileMeta?.fileName).filter(Boolean));
+      setNotes(current => [
+        ...newNotes,
+        ...current.filter(note => !importedFileNames.has(note.fileMeta?.fileName)),
+      ]);
     },
     resetNotes() {
       setNotes(SEED_NOTES);

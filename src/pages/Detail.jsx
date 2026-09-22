@@ -42,6 +42,13 @@ export default function Detail() {
         ))}
       </div>
 
+      {note.importWarning && (
+        <div className="detail-import-warning">
+          <strong>⚠️ 解析提醒</strong>
+          <span>{note.importWarning}</span>
+        </div>
+      )}
+
       {/* Rule summary card */}
       <div style={{
         background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', borderRadius: 16,

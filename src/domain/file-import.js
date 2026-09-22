@@ -15,6 +15,104 @@ export class FileImportError extends Error {
   }
 }
 
+const PDF_GLYPH_REPLACEMENTS = new Map([
+  ['\uf028', '('],
+  ['\uf029', ')'],
+  ['\uf02b', '+'],
+  ['\uf02d', '−'],
+  ['\uf02f', '/'],
+  ['\uf03d', '='],
+  ['\uf05b', '['],
+  ['\uf05d', ']'],
+  ['\uf07c', '|'],
+]);
+
+const PAGE_NUMBER_PATTERN = /^第\s*\d+\s*页\s*[（(]\s*共\s*\d+\s*页\s*[）)]$/;
+
+function repairPdfGlyphs(value) {
+  let repairedGlyphs = 0;
+  const text = [...String(value || '')].map(char => {
+    if (!PDF_GLYPH_REPLACEMENTS.has(char)) return char;
+    repairedGlyphs += 1;
+    return PDF_GLYPH_REPLACEMENTS.get(char);
+  }).join('');
+  return { text, repairedGlyphs };
+}
+
+function normalizePdfLine(value) {
+  let text = String(value || '').replace(/\s+/g, ' ').trim();
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, '$1');
+  } while (text !== previous);
+  return text
+    .replace(/\s+([，。；：！？、）】])/g, '$1')
+    .replace(/([（【])\s+/g, '$1')
+    .replace(/\s*([+−=|])\s*/g, '$1')
+    .trim();
+}
+
+function shouldInsertSpace(previousText, nextText, gap) {
+  if (gap > 20) return true;
+  const previous = previousText.at(-1) || '';
+  const next = nextText[0] || '';
+  const previousIsLatin = /[a-z0-9]/i.test(previous);
+  const nextIsLatin = /[a-z0-9]/i.test(next);
+  return previousIsLatin && nextIsLatin && gap > 1.5;
+}
+
+export function rebuildPdfPageText(items, lineTolerance = 3) {
+  const fragments = (items || [])
+    .filter(item => String(item?.str || '').trim())
+    .map(item => {
+      const repaired = repairPdfGlyphs(item.str);
+      return {
+        text: repaired.text.trim(),
+        repairedGlyphs: repaired.repairedGlyphs,
+        x: Number(item.transform?.[4] || 0),
+        y: Number(item.transform?.[5] || 0),
+        width: Math.max(0, Number(item.width || 0)),
+      };
+    })
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+
+  const lines = [];
+  fragments.forEach(fragment => {
+    const currentLine = lines.at(-1);
+    if (!currentLine || Math.abs(currentLine.y - fragment.y) > lineTolerance) {
+      lines.push({ y: fragment.y, items: [fragment] });
+      return;
+    }
+    currentLine.items.push(fragment);
+  });
+
+  let repairedGlyphs = 0;
+  let unresolvedGlyphs = 0;
+  const textLines = lines.map(line => {
+    const ordered = [...line.items].sort((a, b) => a.x - b.x);
+    let text = '';
+    let previousEnd = null;
+    ordered.forEach(item => {
+      repairedGlyphs += item.repairedGlyphs;
+      unresolvedGlyphs += ([...item.text].filter(char => (
+        /[\uE000-\uF8FF]/.test(char) || char === '\ufffd' || char === '□'
+      )).length);
+      const gap = previousEnd === null ? 0 : item.x - previousEnd;
+      if (text && shouldInsertSpace(text, item.text, gap)) text += ' ';
+      text += item.text;
+      previousEnd = Math.max(previousEnd ?? item.x, item.x + item.width);
+    });
+    return normalizePdfLine(text);
+  }).filter(line => line && !PAGE_NUMBER_PATTERN.test(line));
+
+  return {
+    text: textLines.join('\n'),
+    repairedGlyphs,
+    unresolvedGlyphs,
+  };
+}
+
 export function getFileExtension(fileName) {
   return String(fileName || '').toLowerCase().split('.').pop() || '';
 }
@@ -57,23 +155,34 @@ async function extractPdf(file) {
     document = await loadingTask.promise;
     const pageLimit = Math.min(document.numPages, FILE_IMPORT_LIMITS.maxPdfPages);
     const pages = [];
+    let repairedGlyphs = 0;
+    let unresolvedGlyphs = 0;
     for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
-      const pageText = content.items.map(item => item.str || '').join(' ');
-      pages.push(pageText);
+      const rebuilt = rebuildPdfPageText(content.items);
+      pages.push(rebuilt.text);
+      repairedGlyphs += rebuilt.repairedGlyphs;
+      unresolvedGlyphs += rebuilt.unresolvedGlyphs;
     }
     const cleaned = cleanExtractedText(pages.join('\n\n'));
     if (cleaned.length < 20) {
       throw new FileImportError('scanned-pdf', '没有提取到可用文字，可能是扫描版 PDF；当前 Demo 暂不支持 OCR。');
     }
     const limited = limitText(cleaned);
+    const warnings = [];
+    if (document.numPages > pageLimit) warnings.push(`文件共 ${document.numPages} 页，本次仅整理前 ${pageLimit} 页。`);
+    if (limited.truncated) warnings.push('资料较长，本次仅保留前 8 万字。');
+    if (repairedGlyphs > 0) {
+      warnings.push(`已修复 ${repairedGlyphs} 个常见数学符号；复杂公式、数轴或图片仍建议对照原 PDF。`);
+    }
+    if (unresolvedGlyphs > 0) {
+      warnings.push(`仍有 ${unresolvedGlyphs} 个符号无法可靠识别，请检查原 PDF。`);
+    }
     return {
       ...limited,
       pageCount: document.numPages,
-      warning: document.numPages > pageLimit
-        ? `文件共 ${document.numPages} 页，本次仅整理前 ${pageLimit} 页。`
-        : limited.truncated ? '资料较长，本次仅保留前 8 万字。' : '',
+      warning: warnings.join(' '),
     };
   } catch (error) {
     if (error instanceof FileImportError) throw error;

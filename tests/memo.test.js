@@ -13,7 +13,7 @@ import {
   retrieveNotes,
   summarizeText,
 } from '../src/domain/memo.js';
-import { extractTextFromFile, getFileKind } from '../src/domain/file-import.js';
+import { extractTextFromFile, getFileKind, rebuildPdfPageText } from '../src/domain/file-import.js';
 
 test('text import creates a local note with summary and key points', () => {
   const note = createNoteFromText({
@@ -76,6 +76,28 @@ test('legacy Word files return an actionable boundary message', async () => {
     extractTextFromFile({ name: '旧讲义.doc', size: 128 }),
     error => error.code === 'legacy-word' && error.message.includes('.docx'),
   );
+});
+
+test('PDF text is rebuilt by visual coordinates instead of internal stream order', () => {
+  const rebuilt = rebuildPdfPageText([
+    { str: '第 1 页（共 1 页）', transform: [1, 0, 0, 1, 260, 50], width: 70 },
+    { str: '题目正文', transform: [1, 0, 0, 1, 68, 700], width: 48 },
+    { str: 'b', transform: [1, 0, 0, 1, 102, 680], width: 6 },
+    { str: '\uf02b', transform: [1, 0, 0, 1, 94, 680], width: 6 },
+    { str: 'a', transform: [1, 0, 0, 1, 86, 680], width: 6 },
+  ]);
+
+  assert.equal(rebuilt.text, '题目正文\na+b');
+  assert.equal(rebuilt.repairedGlyphs, 1);
+  assert.equal(rebuilt.unresolvedGlyphs, 0);
+});
+
+test('PDF extraction reports private-use glyphs that cannot be safely repaired', () => {
+  const rebuilt = rebuildPdfPageText([
+    { str: '公式\uf0ff', transform: [1, 0, 0, 1, 68, 700], width: 48 },
+  ]);
+
+  assert.equal(rebuilt.unresolvedGlyphs, 1);
 });
 
 test('Chinese natural-language questions retrieve matching notes', () => {

@@ -500,3 +500,17 @@ html, body, #root {
 .note-card-meta { display: flex; flex-wrap: wrap; gap: 6px; }
 .note-card-meta span { padding: 2px 8px; border-radius: 6px; background: #f6f7fb; color: #9aa0b5; font-size: 11px; }
 .note-card-meta time { margin-left: auto; align-self: center; color: #c3c8d9; font-size: 11px; }
+.detail-import-warning {
+  margin-bottom: 16px;
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #fed7aa;
+  border-radius: 12px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.detail-import-warning strong { color: #7c2d12; }

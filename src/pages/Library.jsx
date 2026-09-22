@@ -64,6 +64,7 @@ export default function Library() {
           text: extracted.text,
           mimeType: draft.file.type,
           pageCount: extracted.pageCount,
+          importWarning: extracted.warning,
         });
         updateDraft(draft.id, current => ({
           ...current,
